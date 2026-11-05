@@ -1,278 +1,224 @@
-"""
-ПР5 (ТАЯиВ), вариант 10, часть 2.
-
-Синтаксический анализатор последовательностей выражений методом рекурсивного спуска.
-
-Язык: последовательность выражений, разделённых символом «;» (после последнего
-выражения «;» допускается, но не обязателен).
-Элементы выражений:
-  * целые десятичные константы:            42
-  * рациональные дроби:                    3/4  (числитель/знаменатель, без пробелов)
-  * имена переменных из 1-2 латинских букв: x, ab
-  * унарные операции:                      +  -
-  * бинарные операции:                     *  :  (мультипликативные), +  - (аддитивные)
-  * присваивание (правоассоциативное):     имя = выражение
-  * скобки:                                ( ... )
-Знак деления записывается «:», так как «/» занят под дробную черту.
-
-Грамматика (LL(1), см. README.md):
-    S -> E Q                   Q -> ; K | ε                K -> E Q | ε
-    E -> id T | num R A | ( E ) R A | + U R A | - U R A
-    T -> = E | R A
-    U -> + U | - U | num | id | ( E )
-    R -> * U R | : U R | ε
-    A -> + M A | - M A | ε
-    M -> U R
-
-Каждому нетерминалу соответствует процедура; решение о выборе правила
-принимается по одному символу предпросмотра.
-
-Результат работы: «Accepted» или «Rejected» (stdout).
-Диагностика ошибок (строка, столбец, причина) выводится в stderr; после
-синтаксической ошибки анализ продолжается со следующего «;» (режим паники),
-поэтому за один запуск сообщается о всех ошибочных выражениях.
-
-Запуск:
-    python rd_parser.py файл.txt
-    python rd_parser.py -s "x = 1/2 + y; z = -(x : 3)"
-    echo "a=1;" | python rd_parser.py
-"""
 import sys
-
-sys.setrecursionlimit(20000)
-
-DIGITS = '0123456789'
-LETTERS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
-SPECIALS = '+-*:=();'
-SPACES = ' \t\r\n'
 
 
 class Token:
-    __slots__ = ('kind', 'text', 'pos')
-
     def __init__(self, kind, text, pos):
         self.kind = kind
         self.text = text
         self.pos = pos
 
 
-def tokenize(src):
-    toks = []
-    i, n = 0, len(src)
+DIGITS = '0123456789'
+LETTERS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+SIGNS = '+-*:=();'
+
+
+def tokenize(text):
+    tokens = []
+    i, n = 0, len(text)
     while i < n:
-        c = src[i]
-        if c in SPACES:
+        c = text[i]
+
+        if c in ' \t\r\n':
             i += 1
+
         elif c in DIGITS:
-            j = i
-            while j < n and src[j] in DIGITS:
-                j += 1
-            if j < n and src[j] == '/':
-                k = j + 1
-                while k < n and src[k] in DIGITS:
-                    k += 1
-                if k == j + 1:
-                    toks.append(Token('BAD', 'в дроби «%s/» нет знаменателя' % src[i:j], i))
+            start = i
+            while i < n and text[i] in DIGITS:
+                i += 1
+            if i < n and text[i] == '/':
+                i += 1
+                den_start = i
+                while i < n and text[i] in DIGITS:
+                    i += 1
+                if i == den_start:
+                    tokens.append(Token('BAD', 'после "/" нет знаменателя', start))
                 else:
-                    toks.append(Token('NUM', src[i:k], i))
-                i = k
-            else:                                # целое число
-                toks.append(Token('NUM', src[i:j], i))
-                i = j
-        elif c in LETTERS:
-            j = i
-            while j < n and src[j] in LETTERS:
-                j += 1
-            name = src[i:j]
-            if len(name) > 2:
-                toks.append(Token('BAD', 'имя «%s» длиннее двух символов' % name, i))
+                    tokens.append(Token('NUM', text[start:i], start))
             else:
-                toks.append(Token('ID', name, i))
-            i = j
-        elif c in SPECIALS:
-            toks.append(Token(c, c, i))
+                tokens.append(Token('NUM', text[start:i], start))
+
+        elif c in LETTERS:
+            start = i
+            while i < n and text[i] in LETTERS:
+                i += 1
+            name = text[start:i]
+            if len(name) > 2:
+                tokens.append(Token('BAD', 'имя "%s" длиннее 2 символов' % name, start))
+            else:
+                tokens.append(Token('ID', name, start))
+
+        elif c in SIGNS:
+            tokens.append(Token(c, c, i))
             i += 1
+
         else:
-            msg = 'недопустимый символ %r' % c
-            if c == '/':
-                msg += ' («/» допустим только внутри дроби; деление записывается «:»)'
-            toks.append(Token('BAD', msg, i))
+            tokens.append(Token('BAD', 'недопустимый символ %r' % c, i))
             i += 1
-    toks.append(Token('EOF', '', n))
-    return toks
+
+    tokens.append(Token('EOF', '', n))
+    return tokens
 
 
-def line_col(src, pos):
-    line = src.count('\n', 0, pos) + 1
-    col = pos - src.rfind('\n', 0, pos)
+def line_col(text, pos):
+    """Номер строки и столбца по позиции символа - для сообщений об ошибках."""
+    line = text.count('\n', 0, pos) + 1
+    col = pos - text.rfind('\n', 0, pos)
     return line, col
 
 
-def describe(t):
-    if t.kind == 'EOF':
-        return 'конец ввода'
-    if t.kind == 'NUM':
-        return 'число «%s»' % t.text
-    if t.kind == 'ID':
-        return 'имя «%s»' % t.text
-    return '«%s»' % t.text
-
-
 class ParseError(Exception):
-    def __init__(self, pos, msg):
-        Exception.__init__(self, msg)
+    def __init__(self, pos, message):
+        super().__init__(message)
         self.pos = pos
-        self.msg = msg
-
-
-FIRST_E = ('NUM', 'ID', '(', '+', '-')
-FOLLOW_R = ('+', '-', ';', ')', 'EOF')
-FOLLOW_A = (';', ')', 'EOF')
-
-WANT_EXPR = 'выражение (число, имя, «(» или унарный знак)'
-WANT_OPND = 'операнд (число, имя, «(» или унарный знак)'
-WANT_OP = 'бинарная операция, «)», «;» или конец ввода'
+        self.message = message
 
 
 class Parser:
-    def __init__(self, src):
-        self.src = src
-        self.toks = tokenize(src)
+    """
+    Идея очень простая: держим список токенов и "указатель" self.i на
+    текущий. Каждая функция-нетерминал смотрит на self.tokens[self.i]
+    (токен-"предпросмотр") и по нему решает, какое правило грамматики
+    применить - это и есть "рекурсивный спуск".
+    """
+
+    def __init__(self, text):
+        self.text = text
+        self.tokens = tokenize(text)
         self.i = 0
         self.errors = []
 
-    @property
-    def cur(self):
-        return self.toks[self.i]
+    def peek(self):
+        """Текущий токен, не сдвигая указатель."""
+        return self.tokens[self.i]
 
-    def advance(self):
-        t = self.toks[self.i]
+    def next(self):
+        """Текущий токен, со сдвигом указателя на следующий."""
+        t = self.tokens[self.i]
         if t.kind != 'EOF':
             self.i += 1
         return t
 
-    def fail(self, expected):
-        t = self.cur
+    def error(self, expected):
+        t = self.peek()
         if t.kind == 'BAD':
             raise ParseError(t.pos, 'лексическая ошибка: ' + t.text)
-        raise ParseError(t.pos, 'ожидалось: %s; найдено: %s' % (expected, describe(t)))
+        got = {'EOF': 'конец ввода', 'NUM': 'число "%s"' % t.text,
+               'ID': 'имя "%s"' % t.text}.get(t.kind, '"%s"' % t.text)
+        raise ParseError(t.pos, 'ожидалось %s, а найдено: %s' % (expected, got))
 
-    def expect(self, kind, expected):
-        if self.cur.kind != kind:
-            self.fail(expected)
-        return self.advance()
+    def expect(self, kind, expected_name):
+        """Проверить, что текущий токен - это kind, и сдвинуться дальше."""
+        if self.peek().kind != kind:
+            self.error(expected_name)
+        return self.next()
 
-    def program(self):
-        self.item()
-        while self.cur.kind == ';':
-            self.advance()
-            if self.cur.kind == 'EOF':
+    def parse_program(self):
+        self.parse_statement()
+        while self.peek().kind == ';':
+            self.next()
+            if self.peek().kind == 'EOF':
                 break
-            self.item()
+            self.parse_statement()
 
-    def item(self):
+    def parse_statement(self):
+        """Одно выражение. Если в нём ошибка - запоминаем её и ищем
+        следующее ';' , чтобы не останавливать разбор всего текста."""
         try:
-            self.expr()
-            if self.cur.kind not in (';', 'EOF'):
-                self.fail('«;» или конец ввода')
+            self.parse_expr()
+            if self.peek().kind not in (';', 'EOF'):
+                self.error('";" или конец ввода')
         except ParseError as e:
             self.errors.append(e)
-            self.synchronize()
+            while self.peek().kind not in (';', 'EOF'):
+                self.next()
 
-    def synchronize(self):
-        """Режим паники: пропуск до ближайшего «;» (он не потребляется) или конца ввода."""
-        while self.cur.kind not in (';', 'EOF'):
-            self.advance()
+    def parse_expr(self):
+        kind = self.peek().kind
 
-    def expr(self):
-        k = self.cur.kind
-        if k == 'ID':
-            self.advance()
-            self.tail()
-        elif k == 'NUM':
-            self.advance()
-            self.mul_rest()
-            self.add_rest()
-        elif k == '(':
-            self.advance()
-            self.expr()
-            self.expect(')', '«)»')
-            self.mul_rest()
-            self.add_rest()
-        elif k in ('+', '-'):
-            self.advance()
-            self.unary()
-            self.mul_rest()
-            self.add_rest()
+        if kind == 'ID':
+            self.next()
+            self.parse_tail()
+
+        elif kind == 'NUM':
+            self.next()
+            self.parse_mul_rest()
+            self.parse_add_rest()
+
+        elif kind == '(':
+            self.next()
+            self.parse_expr()
+            self.expect(')', '")"')
+            self.parse_mul_rest()
+            self.parse_add_rest()
+
+        elif kind in ('+', '-'):
+            self.next()
+            self.parse_unary()
+            self.parse_mul_rest()
+            self.parse_add_rest()
+
         else:
-            self.fail(WANT_EXPR)
+            self.error('выражение (число, имя, "(" или "+"/"-")')
 
-    def tail(self):
-        if self.cur.kind == '=':
-            self.advance()
-            self.expr()
+    def parse_tail(self):
+        if self.peek().kind == '=':
+            self.next()
+            self.parse_expr()
         else:
-            self.mul_rest()
-            self.add_rest()
+            self.parse_mul_rest()
+            self.parse_add_rest()
 
-    def unary(self):
-        k = self.cur.kind
-        if k in ('+', '-'):
-            self.advance()
-            self.unary()
-        elif k in ('NUM', 'ID'):
-            self.advance()
-        elif k == '(':
-            self.advance()
-            self.expr()
-            self.expect(')', '«)»')
+    def parse_unary(self):
+        kind = self.peek().kind
+        if kind in ('+', '-'):
+            self.next()
+            self.parse_unary()
+        elif kind in ('NUM', 'ID'):
+            self.next()
+        elif kind == '(':
+            self.next()
+            self.parse_expr()
+            self.expect(')', '")"')
         else:
-            self.fail(WANT_OPND)
+            self.error('операнд (число, имя, "(" или "+"/"-")')
 
-    def mul(self):
-        self.unary()
-        self.mul_rest()
+    def parse_mul_rest(self):
+        while self.peek().kind in ('*', ':'):
+            self.next()
+            self.parse_unary()
 
-    def mul_rest(self):
-        while self.cur.kind in ('*', ':'):
-            self.advance()
-            self.unary()
-        if self.cur.kind not in FOLLOW_R:
-            self.fail(WANT_OP)
+        if self.peek().kind not in ('+', '-', ';', ')', 'EOF'):
+            self.error('операция, ")", ";" или конец ввода')
 
-    def add_rest(self):
-        while self.cur.kind in ('+', '-'):
-            self.advance()
-            self.mul()
-        if self.cur.kind not in FOLLOW_A:
-            self.fail(WANT_OP)
+    def parse_add_rest(self):
+        while self.peek().kind in ('+', '-'):
+            self.next()
+            self.parse_mul()                   # M -> U R
+        if self.peek().kind not in (';', ')', 'EOF'):
+            self.error('операция, ")", ";" или конец ввода')
+
+    def parse_mul(self):
+        self.parse_unary()
+        self.parse_mul_rest()
 
 
-def check(src):
-    """Возвращает (принято?, список ParseError)."""
-    p = Parser(src)
-    p.program()
+def check(text):
+    """Возвращает (принято?, список_ошибок)."""
+    p = Parser(text)
+    p.parse_program()
     return (not p.errors), p.errors
 
 
 def main(argv):
-    import argparse
-    ap = argparse.ArgumentParser(description='Рекурсивный спуск: последовательность выражений (ПР5, вариант 10)')
-    ap.add_argument('file', nargs='?', help='файл с текстом (по умолчанию - stdin)')
-    ap.add_argument('-s', '--string', help='анализировать строку, переданную в аргументе')
-    args = ap.parse_args(argv)
-    if args.string is not None:
-        src = args.string
-    elif args.file:
-        with open(args.file, encoding='utf-8') as f:
-            src = f.read()
-    else:
-        src = sys.stdin.read()
-    ok, errors = check(src)
+    if len(argv) != 1:
+        print('Использование: python rd_parser.py "строка для разбора"', file=sys.stderr)
+        return 2
+    text = argv[0]
+    ok, errors = check(text)
     for e in errors:
-        l, c = line_col(src, e.pos)
-        print('  строка %d, столбец %d: %s' % (l, c, e.msg), file=sys.stderr)
-    sys.stderr.flush()
+        line, col = line_col(text, e.pos)
+        print('  строка %d, столбец %d: %s' % (line, col, e.message), file=sys.stderr)
     print('Accepted' if ok else 'Rejected')
     return 0 if ok else 1
 

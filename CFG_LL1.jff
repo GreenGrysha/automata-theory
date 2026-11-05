@@ -75,7 +75,7 @@
 	</production>
 	<production>
 		<left>P</left>
-		<right>(E)</right>
+		<right>[E]</right>
 	</production>
 	<production>
 		<left>F</left>
